@@ -195,10 +195,11 @@ export function Dashboard() {
         { headers: getAuthHeaders(), signal },
       )
       const data = await response.json()
+      const list = Array.isArray(data?.data) ? data.data : []
 
-      if (data.success && data.data.length > 0) {
-        const sortedByRequest = [...data.data].sort((a: any, b: any) => b.request_count - a.request_count)
-        const sortedByQuota = [...data.data].sort((a: any, b: any) => b.quota_used - a.quota_used)
+      if (data?.success && list.length > 0) {
+        const sortedByRequest = [...list].sort((a: any, b: any) => b.request_count - a.request_count)
+        const sortedByQuota = [...list].sort((a: any, b: any) => b.quota_used - a.quota_used)
 
         setAnalyticsSummary({
           request_king: sortedByRequest.length > 0 ? {
