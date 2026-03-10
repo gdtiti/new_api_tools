@@ -354,8 +354,8 @@ interactive_config() {
   # API Key 自动生成
   API_KEY="${API_KEY:-$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n' | head -c 64)}"
 
-  # 前端端口默认 1145
-  FRONTEND_PORT="${FRONTEND_PORT:-1145}"
+  # 前端端口默认 7860
+  FRONTEND_PORT="${FRONTEND_PORT:-7860}"
 
   echo ""
 }
@@ -579,7 +579,7 @@ NewAPI Middleware Tool - 一键部署脚本
   NEWAPI_NETWORK     指定 Docker 网络名 (默认: 自动检测)
   ADMIN_PASSWORD     前端访问密码 (默认: 交互式输入)
   API_KEY            后端 API Key (默认: 交互式输入或自动生成)
-  FRONTEND_PORT      前端端口 (默认: 8080)
+  FRONTEND_PORT      前端端口 (默认: 7860)
 
 示例:
   # 基本部署

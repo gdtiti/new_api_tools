@@ -46,6 +46,7 @@ WORKDIR /app
 RUN apk add --no-cache \
     nginx \
     supervisor \
+    redis \
     curl \
     ca-certificates \
     tzdata
@@ -54,7 +55,7 @@ RUN apk add --no-cache \
 COPY --from=backend-builder /build/server /app/server
 
 # 创建数据目录
-RUN mkdir -p /app/data && chmod 755 /app/data
+RUN mkdir -p /app/data /app/data/redis && chmod 755 /app/data /app/data/redis
 
 # 复制前端构建产物
 COPY --from=frontend-builder /app/dist /usr/share/nginx/html
@@ -65,19 +66,50 @@ COPY frontend/nginx.conf /etc/nginx/http.d/default.conf
 # 修改 Nginx 配置，代理到本地 Go 后端
 RUN sed -i 's|http://backend:8000|http://127.0.0.1:8000|g' /etc/nginx/http.d/default.conf
 
-# Supervisor 配置 - 同时运行 Nginx 和 Go 后端
+# Supervisor 配置 - 同时运行 Nginx / Go 后端 / Redis
 RUN mkdir -p /etc/supervisor.d && \
-    echo -e '[supervisord]\nnodaemon=true\nuser=root\n\n\
-[program:nginx]\ncommand=/usr/sbin/nginx -g "daemon off;"\nautostart=true\nautorestart=true\n\
-stdout_logfile=/dev/stdout\nstdout_logfile_maxbytes=0\n\
-stderr_logfile=/dev/stderr\nstderr_logfile_maxbytes=0\n\n\
-[program:backend]\ncommand=/app/server\ndirectory=/app\nautostart=true\nautorestart=true\n\
-stdout_logfile=/dev/stdout\nstdout_logfile_maxbytes=0\n\
-stderr_logfile=/dev/stderr\nstderr_logfile_maxbytes=0\n' > /etc/supervisord.conf
+    cat <<'EOF' > /etc/supervisord.conf
+[supervisord]
+nodaemon=true
+user=root
 
-EXPOSE 80
+[program:nginx]
+command=/usr/sbin/nginx -g "daemon off;"
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+
+[program:backend]
+command=/app/server
+directory=/app
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+
+[program:redis]
+command=/bin/sh -c 'REDIS_ARGS="--appendonly ${REDIS_APPENDONLY:-yes} --dir /app/data/redis --maxmemory ${REDIS_MAXMEMORY:-256mb} --maxmemory-policy ${REDIS_MAXMEMORY_POLICY:-allkeys-lru}"; if [ -n "$REDIS_PASSWORD" ]; then REDIS_ARGS="$REDIS_ARGS --requirepass $REDIS_PASSWORD"; fi; exec redis-server $REDIS_ARGS'
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+EOF
+
+ENV SERVER_PORT=8000
+ENV REDIS_HOST=127.0.0.1
+ENV REDIS_PORT=6379
+ENV PORT=7860
+
+EXPOSE 7860
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost/api/health || exit 1
+    CMD curl -f "http://localhost:${PORT:-7860}/api/health" || exit 1
 
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
+CMD ["/bin/sh", "-c", "PORT=${PORT:-7860}; export PORT; sed -i \"s/listen [0-9][0-9]*;/listen ${PORT};/\" /etc/nginx/http.d/default.conf; exec /usr/bin/supervisord -c /etc/supervisord.conf"]

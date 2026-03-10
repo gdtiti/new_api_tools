@@ -237,14 +237,14 @@ detect_env_details() {
     ENV_DB_DNS=$(grep -E '^DB_DNS=' "$env_file" 2>/dev/null | cut -d'=' -f2 || echo "未知")
     ENV_DB_PORT=$(grep -E '^DB_PORT=' "$env_file" 2>/dev/null | cut -d'=' -f2 || echo "未知")
     ENV_DB_NAME=$(grep -E '^DB_NAME=' "$env_file" 2>/dev/null | cut -d'=' -f2 || echo "未知")
-    ENV_FRONTEND_PORT=$(grep -E '^FRONTEND_PORT=' "$env_file" 2>/dev/null | cut -d'=' -f2 || echo "1145")
+    ENV_FRONTEND_PORT=$(grep -E '^FRONTEND_PORT=' "$env_file" 2>/dev/null | cut -d'=' -f2 || echo "7860")
   else
     ENV_NEWAPI_NETWORK="未配置"
     ENV_DB_ENGINE="未配置"
     ENV_DB_DNS="未配置"
     ENV_DB_PORT="未配置"
     ENV_DB_NAME="未配置"
-    ENV_FRONTEND_PORT="1145"
+    ENV_FRONTEND_PORT="7860"
   fi
 
   # 判断网络模式
@@ -412,7 +412,7 @@ do_update_interactive() {
 
   # 显示访问地址
   local frontend_port
-  frontend_port=$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | cut -d'=' -f2 || echo "1145")
+  frontend_port=$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | cut -d'=' -f2 || echo "7860")
   local server_ip
   server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || server_ip="localhost"
   echo ""
@@ -437,7 +437,7 @@ do_status_interactive() {
   echo ""
   echo -e "${BLUE}--- 访问信息 ---${NC}"
   local frontend_port
-  frontend_port=$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | cut -d'=' -f2 || echo "1145")
+  frontend_port=$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | cut -d'=' -f2 || echo "7860")
   local server_ip
   server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')" || server_ip="localhost"
   echo -e "访问地址: ${GREEN}http://${server_ip}:${frontend_port}${NC}"
@@ -889,7 +889,7 @@ quick_update() {
 
   # 获取前端端口
   local frontend_port
-  frontend_port=$(grep -E '^FRONTEND_PORT=' "$env_file" | cut -d'=' -f2 || echo "1145")
+  frontend_port=$(grep -E '^FRONTEND_PORT=' "$env_file" | cut -d'=' -f2 || echo "7860")
 
   # 获取服务器 IP
   local server_ip

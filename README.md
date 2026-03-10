@@ -67,14 +67,14 @@ bash <(curl -sSL https://raw.githubusercontent.com/james-6-23/new_api_tools/main
    ```bash
    docker-compose up -d
    ```
-   部署完成后访问：`http://your-server-ip:1145`
+   部署完成后访问：`http://your-server-ip:7860`
 
 ## ⚙️ 配置说明 (.env)
 
 | 变量名 | 说明 | 示例/默认值 |
 |--------|------|-------------|
 | **基础配置** | | |
-| `FRONTEND_PORT` | 服务访问端口 | `1145` |
+| `FRONTEND_PORT` | 服务访问端口 | `7860` |
 | `ADMIN_PASSWORD` | 管理后台登录密码 | `123456` |
 | `API_KEY` | 后端 API 密钥（可选） | - |
 | `JWT_SECRET` | JWT 签名密钥 | `random_string` |
@@ -87,7 +87,8 @@ bash <(curl -sSL https://raw.githubusercontent.com/james-6-23/new_api_tools/main
 | `DB_USER` | 数据库用户名 | `postgres` |
 | `DB_PASSWORD` | 数据库密码 | - |
 | **Redis 缓存配置** | | |
-| `REDIS_HOST` | Redis 服务地址 | `redis`（Docker内部） |
+| `REDIS_CONN_STRING` | Redis 连接串（优先） | `redis://:pass@127.0.0.1:6379/0` |
+| `REDIS_HOST` | Redis 服务地址 | `127.0.0.1`（容器内置） |
 | `REDIS_PORT` | Redis 端口 | `6379` |
 | `REDIS_PASSWORD` | Redis 密码（可选） | 留空或设置密码 |
 | `REDIS_DB` | Redis 数据库编号 | `0` |
