@@ -819,26 +819,27 @@ export function ModelStatusEmbed({
     try {
       const response = await fetch(`${apiUrl}/api/model-status/embed/config/selected`)
       const data = await response.json()
-      if (data.success) {
-        if (data.data.length > 0) {
-          setSelectedModels(data.data)
+      const list = Array.isArray(data?.data) ? data.data : []
+      if (data?.success) {
+        if (list.length > 0) {
+          setSelectedModels(list)
         }
-        if (data.time_window) {
+        if (data?.time_window) {
           setTimeWindow(data.time_window)
         }
         // Load refresh interval from backend
-        if (data.refresh_interval !== undefined && data.refresh_interval !== null) {
+        if (data?.refresh_interval !== undefined && data?.refresh_interval !== null) {
           setRefreshInterval(data.refresh_interval)
           setCountdown(data.refresh_interval)
         }
         // Load theme from backend if not overridden by URL
         const urlParams = new URLSearchParams(window.location.search)
-        if (!urlParams.get('theme') && data.theme) {
+        if (!urlParams.get('theme') && data?.theme) {
           // Validate theme exists in themeStyles, fallback to daylight for legacy values
           const validTheme = THEMES.find(t => t.id === data.theme) ? data.theme : 'daylight'
           setTheme(validTheme as ThemeId)
         }
-        return data.data || []
+        return list
       }
     } catch (error) {
       console.error('Failed to load config from backend:', error)
@@ -866,8 +867,8 @@ export function ModelStatusEmbed({
         body: JSON.stringify(selectedModels),
       })
       const data = await response.json()
-      if (data.success) {
-        setModelStatuses(data.data)
+      if (data?.success) {
+        setModelStatuses(Array.isArray(data?.data) ? data.data : [])
         setLastUpdate(new Date())
       }
     } catch (error) {

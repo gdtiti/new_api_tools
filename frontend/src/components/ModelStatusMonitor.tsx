@@ -424,35 +424,36 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
         headers: getAuthHeaders(),
       })
       const data = await response.json()
-      if (data.success) {
-        if (data.data.length > 0) {
-          setSelectedModels(data.data)
-          localStorage.setItem(SELECTED_MODELS_KEY, JSON.stringify(data.data))
+      const list = Array.isArray(data?.data) ? data.data : []
+      if (data?.success) {
+        if (list.length > 0) {
+          setSelectedModels(list)
+          localStorage.setItem(SELECTED_MODELS_KEY, JSON.stringify(list))
         }
-        if (data.time_window) {
+        if (data?.time_window) {
           setTimeWindow(data.time_window)
           localStorage.setItem(TIME_WINDOW_KEY, data.time_window)
         }
-        if (data.theme) {
+        if (data?.theme) {
           // Validate theme exists, fallback to daylight for legacy values (light/dark/system)
           const validTheme = THEMES.find(t => t.id === data.theme) ? data.theme : 'daylight'
           setTheme(validTheme)
           localStorage.setItem(THEME_KEY, validTheme)
         }
-        if (data.refresh_interval !== undefined && data.refresh_interval !== null) {
+        if (data?.refresh_interval !== undefined && data?.refresh_interval !== null) {
           setRefreshInterval(data.refresh_interval)
           setCountdown(data.refresh_interval)
           localStorage.setItem(REFRESH_INTERVAL_KEY, data.refresh_interval.toString())
         }
-        if (data.sort_mode) {
+        if (data?.sort_mode) {
           setSortMode(data.sort_mode as SortMode)
           localStorage.setItem(SORT_MODE_KEY, data.sort_mode)
         }
-        if (data.custom_order && data.custom_order.length > 0) {
+        if (Array.isArray(data?.custom_order) && data.custom_order.length > 0) {
           setCustomOrder(data.custom_order)
           localStorage.setItem(CUSTOM_ORDER_KEY, JSON.stringify(data.custom_order))
         }
-        return data.data || []
+        return list
       }
     } catch (error) {
       console.error('Failed to load config from backend:', error)
@@ -480,21 +481,22 @@ export function ModelStatusMonitor({ isEmbed = false }: ModelStatusMonitorProps)
         headers: getAuthHeaders(),
       })
       const data = await response.json()
-      if (data.success) {
+      const list = Array.isArray(data?.data) ? data.data : []
+      if (data?.success) {
         // data.data is now an array of { model_name, request_count_24h }
-        setAvailableModels(data.data)
+        setAvailableModels(list)
         // Load config from backend
         const savedModels = await loadConfigFromBackend()
         // Auto-select models with requests in last 24h if none selected
-        if (savedModels.length === 0 && data.data.length > 0) {
+        if (savedModels.length === 0 && list.length > 0) {
           // Filter models that have requests in the last 24 hours
-          const activeModels = data.data
+          const activeModels = list
             .filter((m: ModelWithStats) => m.request_count_24h > 0)
             .map((m: ModelWithStats) => m.model_name)
           // If no active models, fall back to first 5
           const defaultModels = activeModels.length > 0
             ? activeModels
-            : data.data.slice(0, 5).map((m: ModelWithStats) => m.model_name)
+            : list.slice(0, 5).map((m: ModelWithStats) => m.model_name)
           setSelectedModels(defaultModels)
           saveSelectedModelsToBackend(defaultModels)
         }
