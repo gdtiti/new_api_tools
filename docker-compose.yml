@@ -26,6 +26,15 @@ services:
       - DB_NAME=${DB_NAME:-}
       - DB_USER=${DB_USER:-}
       - DB_PASSWORD=${DB_PASSWORD:-}
+      # 日志数据库配置
+      # 优先级: LOG_SQL_DSN > LOG_DB_* > SQL_DSN
+      - LOG_SQL_DSN=${LOG_SQL_DSN:-}
+      - LOG_DB_ENGINE=${LOG_DB_ENGINE:-}
+      - LOG_DB_HOST=${LOG_DB_HOST:-}
+      - LOG_DB_PORT=${LOG_DB_PORT:-}
+      - LOG_DB_NAME=${LOG_DB_NAME:-}
+      - LOG_DB_USER=${LOG_DB_USER:-}
+      - LOG_DB_PASSWORD=${LOG_DB_PASSWORD:-}
       # 认证
       - API_KEY=${API_KEY}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}

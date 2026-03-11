@@ -23,7 +23,8 @@ const (
 
 // UserManagementService handles user queries and operations
 type UserManagementService struct {
-	db *database.Manager
+	db    *database.Manager
+	logDB *database.Manager
 }
 
 // Cached OAuth column existence checks
@@ -37,7 +38,10 @@ var allOAuthColumns = []string{"github_id", "wechat_id", "telegram_id", "discord
 
 // NewUserManagementService creates a new UserManagementService
 func NewUserManagementService() *UserManagementService {
-	return &UserManagementService{db: database.Get()}
+	return &UserManagementService{
+		db:    database.Get(),
+		logDB: database.GetLog(),
+	}
 }
 
 // getAvailableOAuthColumns returns OAuth columns that exist in the users table (cached)
@@ -85,29 +89,37 @@ func (s *UserManagementService) GetActivityStats(quick bool) (map[string]interfa
 		}, nil
 	}
 
-	// Full stats: count users by last request time using EXISTS subquery
-	activeQuery := fmt.Sprintf(
-		`SELECT COUNT(*) as count FROM users u 
-		 WHERE u.deleted_at IS NULL AND u.request_count > 0 
-		 AND EXISTS (SELECT 1 FROM logs l WHERE l.user_id = u.id AND l.type IN (2,5) AND l.created_at >= %d)`,
-		activeThreshold)
-	activeRow, _ := s.db.QueryOne(activeQuery)
-	activeCount := int64(0)
-	if activeRow != nil {
-		activeCount = toInt64(activeRow["count"])
+	// Full stats: count users by last request time using log DB (no cross-DB join)
+	activeUserIDs, err := s.getLogUserIDs(`
+		SELECT DISTINCT user_id
+		FROM logs
+		WHERE user_id IS NOT NULL AND user_id > 0
+			AND type IN (2,5) AND created_at >= ?`, activeThreshold)
+	if err != nil {
+		return nil, err
+	}
+	activeCount, err := s.countUsersByIDs(activeUserIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	// Inactive: has requests but last request between 7-30 days ago
-	inactiveQuery := fmt.Sprintf(
-		`SELECT COUNT(*) as count FROM users u 
-		 WHERE u.deleted_at IS NULL AND u.request_count > 0 
-		 AND EXISTS (SELECT 1 FROM logs l WHERE l.user_id = u.id AND l.type IN (2,5) AND l.created_at >= %d AND l.created_at < %d)
-		 AND NOT EXISTS (SELECT 1 FROM logs l WHERE l.user_id = u.id AND l.type IN (2,5) AND l.created_at >= %d)`,
-		inactiveThreshold, activeThreshold, activeThreshold)
-	inactiveRow, _ := s.db.QueryOne(inactiveQuery)
-	inactiveCount := int64(0)
-	if inactiveRow != nil {
-		inactiveCount = toInt64(inactiveRow["count"])
+	inactiveUserIDs, err := s.getLogUserIDs(`
+		SELECT DISTINCT user_id
+		FROM logs
+		WHERE user_id IS NOT NULL AND user_id > 0
+			AND type IN (2,5) AND created_at >= ? AND created_at < ?
+			AND user_id NOT IN (
+				SELECT DISTINCT user_id FROM logs
+				WHERE user_id IS NOT NULL AND user_id > 0
+					AND type IN (2,5) AND created_at >= ?
+			)`, inactiveThreshold, activeThreshold, activeThreshold)
+	if err != nil {
+		return nil, err
+	}
+	inactiveCount, err := s.countUsersByIDs(inactiveUserIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	// Never requested
@@ -520,10 +532,52 @@ func (s *UserManagementService) BatchDeleteInactiveUsers(activityLevel string, d
 		condition = "request_count = 0"
 	case ActivityVeryInactive:
 		threshold := now - InactiveThreshold
-		condition = fmt.Sprintf("request_count > 0 AND id NOT IN (SELECT DISTINCT user_id FROM logs WHERE type IN (2,5) AND created_at >= %d)", threshold)
+		userIDs, err := s.getInactiveUserIDsByLogThreshold(threshold)
+		if err != nil {
+			return nil, err
+		}
+		affected := int64(len(userIDs))
+		if dryRun {
+			return map[string]interface{}{
+				"dry_run":        true,
+				"affected_count": affected,
+				"activity_level": activityLevel,
+			}, nil
+		}
+		if err := s.applyBatchUserDelete(userIDs, hardDelete, now); err != nil {
+			return nil, err
+		}
+		logger.L.Business(fmt.Sprintf("批量删除 %s 用户: %d 个", activityLevel, affected))
+		return map[string]interface{}{
+			"dry_run":        false,
+			"affected_count": affected,
+			"activity_level": activityLevel,
+			"hard_delete":    hardDelete,
+		}, nil
 	case ActivityInactive:
 		threshold := now - ActiveThreshold
-		condition = fmt.Sprintf("request_count > 0 AND id NOT IN (SELECT DISTINCT user_id FROM logs WHERE type IN (2,5) AND created_at >= %d)", threshold)
+		userIDs, err := s.getInactiveUserIDsByLogThreshold(threshold)
+		if err != nil {
+			return nil, err
+		}
+		affected := int64(len(userIDs))
+		if dryRun {
+			return map[string]interface{}{
+				"dry_run":        true,
+				"affected_count": affected,
+				"activity_level": activityLevel,
+			}, nil
+		}
+		if err := s.applyBatchUserDelete(userIDs, hardDelete, now); err != nil {
+			return nil, err
+		}
+		logger.L.Business(fmt.Sprintf("批量删除 %s 用户: %d 个", activityLevel, affected))
+		return map[string]interface{}{
+			"dry_run":        false,
+			"affected_count": affected,
+			"activity_level": activityLevel,
+			"hard_delete":    hardDelete,
+		}, nil
 	default:
 		return nil, fmt.Errorf("invalid activity level: %s", activityLevel)
 	}
@@ -563,6 +617,142 @@ func (s *UserManagementService) BatchDeleteInactiveUsers(activityLevel string, d
 		"activity_level": activityLevel,
 		"hard_delete":    hardDelete,
 	}, nil
+}
+
+func (s *UserManagementService) getLogUserIDs(query string, args ...interface{}) ([]int64, error) {
+	query = s.logDB.RebindQuery(query)
+	rows, err := s.logDB.Query(query, args...)
+	if err != nil || rows == nil {
+		return nil, err
+	}
+	result := make([]int64, 0, len(rows))
+	seen := make(map[int64]struct{})
+	for _, row := range rows {
+		userID := toInt64(row["user_id"])
+		if userID <= 0 {
+			continue
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		result = append(result, userID)
+	}
+	return result, nil
+}
+
+func (s *UserManagementService) countUsersByIDs(userIDs []int64) (int64, error) {
+	if len(userIDs) == 0 {
+		return 0, nil
+	}
+	const batchSize = 500
+	var total int64
+	for i := 0; i < len(userIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(userIDs) {
+			end = len(userIDs)
+		}
+		batch := userIDs[i:end]
+		placeholders := buildPlaceholders(s.db.IsPG, len(batch), 1)
+		query := fmt.Sprintf("SELECT COUNT(*) as count FROM users WHERE deleted_at IS NULL AND request_count > 0 AND id IN (%s)", placeholders)
+		if !s.db.IsPG {
+			query = s.db.RebindQuery(query)
+		}
+		args := make([]interface{}, 0, len(batch))
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		row, err := s.db.QueryOne(query, args...)
+		if err != nil {
+			return 0, err
+		}
+		if row != nil {
+			total += toInt64(row["count"])
+		}
+	}
+	return total, nil
+}
+
+func (s *UserManagementService) getInactiveUserIDsByLogThreshold(threshold int64) ([]int64, error) {
+	recentIDs, err := s.getLogUserIDs(`
+		SELECT DISTINCT user_id
+		FROM logs
+		WHERE user_id IS NOT NULL AND user_id > 0
+			AND type IN (2,5) AND created_at >= ?`, threshold)
+	if err != nil {
+		return nil, err
+	}
+	recentSet := make(map[int64]struct{}, len(recentIDs))
+	for _, id := range recentIDs {
+		recentSet[id] = struct{}{}
+	}
+	rows, err := s.db.Query("SELECT id FROM users WHERE deleted_at IS NULL AND role != 100 AND request_count > 0")
+	if err != nil {
+		return nil, err
+	}
+	target := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		id := toInt64(row["id"])
+		if id <= 0 {
+			continue
+		}
+		if _, ok := recentSet[id]; ok {
+			continue
+		}
+		target = append(target, id)
+	}
+	return target, nil
+}
+
+func (s *UserManagementService) applyBatchUserDelete(userIDs []int64, hardDelete bool, deletedAt int64) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	const batchSize = 500
+	for i := 0; i < len(userIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(userIDs) {
+			end = len(userIDs)
+		}
+		batch := userIDs[i:end]
+		placeholders := buildPlaceholders(s.db.IsPG, len(batch), 1)
+		args := make([]interface{}, 0, len(batch))
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		if hardDelete {
+			tokenQuery := fmt.Sprintf("DELETE FROM tokens WHERE user_id IN (%s)", placeholders)
+			userQuery := fmt.Sprintf("DELETE FROM users WHERE id IN (%s)", placeholders)
+			if !s.db.IsPG {
+				tokenQuery = s.db.RebindQuery(tokenQuery)
+				userQuery = s.db.RebindQuery(userQuery)
+			}
+			if _, err := s.db.Execute(tokenQuery, args...); err != nil {
+				return err
+			}
+			if _, err := s.db.Execute(userQuery, args...); err != nil {
+				return err
+			}
+		} else {
+			var updateQuery string
+			var updateArgs []interface{}
+			if s.db.IsPG {
+				updateQuery = fmt.Sprintf("UPDATE users SET deleted_at = $1 WHERE id IN (%s)", buildPlaceholders(true, len(batch), 2))
+				updateArgs = append(updateArgs, deletedAt)
+			} else {
+				updateQuery = fmt.Sprintf("UPDATE users SET deleted_at = ? WHERE id IN (%s)", placeholders)
+				updateQuery = s.db.RebindQuery(updateQuery)
+				updateArgs = append(updateArgs, deletedAt)
+			}
+			for _, id := range batch {
+				updateArgs = append(updateArgs, id)
+			}
+			if _, err := s.db.Execute(updateQuery, updateArgs...); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // toInt64 safely converts interface{} to int64

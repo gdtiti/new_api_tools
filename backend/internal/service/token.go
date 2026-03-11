@@ -49,12 +49,16 @@ type TokenListParams struct {
 
 // TokenService handles token-related queries
 type TokenService struct {
-	db *database.Manager
+	db    *database.Manager
+	logDB *database.Manager
 }
 
 // NewTokenService creates a new TokenService
 func NewTokenService() *TokenService {
-	return &TokenService{db: database.Get()}
+	return &TokenService{
+		db:    database.Get(),
+		logDB: database.GetLog(),
+	}
 }
 
 // keyCol returns the properly quoted column name for 'key' (reserved word)
@@ -190,7 +194,7 @@ func (s *TokenService) ListTokens(params TokenListParams) (map[string]interface{
 			WHERE type IN (2, 5) AND token_id IN (%s)
 			GROUP BY token_id`, strings.Join(placeholders, ","))
 
-		lastUsedRows, err := s.db.Query(lastUsedQuery, aggArgs...)
+		lastUsedRows, err := s.logDB.Query(lastUsedQuery, aggArgs...)
 		if err != nil {
 			return nil, err
 		}

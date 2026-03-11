@@ -18,12 +18,16 @@ const (
 
 // LogAnalyticsService handles log analytics via direct DB queries + cache
 type LogAnalyticsService struct {
-	db *database.Manager
+	db    *database.Manager
+	logDB *database.Manager
 }
 
 // NewLogAnalyticsService creates a new LogAnalyticsService
 func NewLogAnalyticsService() *LogAnalyticsService {
-	return &LogAnalyticsService{db: database.Get()}
+	return &LogAnalyticsService{
+		db:    database.Get(),
+		logDB: database.GetLog(),
+	}
 }
 
 // GetAnalyticsState returns current processing state from DB
@@ -37,7 +41,7 @@ func (s *LogAnalyticsService) GetAnalyticsState() map[string]interface{} {
 	}
 
 	// Get actual counts from database
-	row, err := s.db.QueryOne(`
+	row, err := s.logDB.QueryOne(`
 		SELECT COUNT(*) as total_processed, COALESCE(MAX(id), 0) as last_log_id
 		FROM logs WHERE type IN (2, 5)`)
 	if err != nil || row == nil {
@@ -90,7 +94,7 @@ func (s *LogAnalyticsService) GetUserRequestRanking(limit int) ([]map[string]int
 	} else {
 		// Fallback: scan logs with 30-day filter
 		thirtyDaysAgo := time.Now().AddDate(0, 0, -30).Unix()
-		query := s.db.RebindQuery(`
+		query := s.logDB.RebindQuery(`
 			SELECT l.user_id,
 				COALESCE(l.username, '') as username,
 				COUNT(*) as request_count,
@@ -100,7 +104,7 @@ func (s *LogAnalyticsService) GetUserRequestRanking(limit int) ([]map[string]int
 			GROUP BY l.user_id, l.username
 			ORDER BY request_count DESC
 			LIMIT ?`)
-		rows, err = s.db.QueryWithTimeout(30*time.Second, query, thirtyDaysAgo, limit)
+		rows, err = s.logDB.QueryWithTimeout(30*time.Second, query, thirtyDaysAgo, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -140,7 +144,7 @@ func (s *LogAnalyticsService) GetUserQuotaRanking(limit int) ([]map[string]inter
 		rows, err = s.db.QueryWithTimeout(30*time.Second, query, limit)
 	} else {
 		thirtyDaysAgo := time.Now().AddDate(0, 0, -30).Unix()
-		query := s.db.RebindQuery(`
+		query := s.logDB.RebindQuery(`
 			SELECT l.user_id,
 				COALESCE(l.username, '') as username,
 				COUNT(*) as request_count,
@@ -150,7 +154,7 @@ func (s *LogAnalyticsService) GetUserQuotaRanking(limit int) ([]map[string]inter
 			GROUP BY l.user_id, l.username
 			ORDER BY quota_used DESC
 			LIMIT ?`)
-		rows, err = s.db.QueryWithTimeout(30*time.Second, query, thirtyDaysAgo, limit)
+		rows, err = s.logDB.QueryWithTimeout(30*time.Second, query, thirtyDaysAgo, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -173,7 +177,7 @@ func (s *LogAnalyticsService) GetModelStatistics(limit int) ([]map[string]interf
 	}
 
 	thirtyDaysAgo := time.Now().AddDate(0, 0, -30).Unix()
-	query := s.db.RebindQuery(`
+	query := s.logDB.RebindQuery(`
 		SELECT model_name,
 			COUNT(*) as total_requests,
 			SUM(CASE WHEN type = 2 THEN 1 ELSE 0 END) as success_count,
@@ -185,7 +189,7 @@ func (s *LogAnalyticsService) GetModelStatistics(limit int) ([]map[string]interf
 		ORDER BY total_requests DESC
 		LIMIT ?`)
 
-	rows, err := s.db.QueryWithTimeout(30*time.Second, query, thirtyDaysAgo, limit)
+	rows, err := s.logDB.QueryWithTimeout(30*time.Second, query, thirtyDaysAgo, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +251,7 @@ func (s *LogAnalyticsService) ProcessLogs() (map[string]interface{}, error) {
 	s.clearAllCaches()
 
 	// Get actual counts to return meaningful response
-	row, _ := s.db.QueryOne(`
+	row, _ := s.logDB.QueryOne(`
 		SELECT COUNT(*) as total, COALESCE(MAX(id), 0) as max_id
 		FROM logs WHERE type IN (2, 5)`)
 
@@ -281,7 +285,7 @@ func (s *LogAnalyticsService) BatchProcess(maxIterations int) (map[string]interf
 	s.clearAllCaches()
 
 	// Get total log count for progress reporting
-	row, _ := s.db.QueryOne(`
+	row, _ := s.logDB.QueryOne(`
 		SELECT COUNT(*) as total, COALESCE(MAX(id), 0) as max_id
 		FROM logs WHERE type IN (2, 5)`)
 
@@ -323,7 +327,7 @@ func (s *LogAnalyticsService) ResetAnalytics() error {
 // GetSyncStatus returns sync status matching frontend SyncStatus interface
 func (s *LogAnalyticsService) GetSyncStatus() (map[string]interface{}, error) {
 	// Since Go queries DB directly, we are always "synced"
-	row, err := s.db.QueryOne(`
+	row, err := s.logDB.QueryOne(`
 		SELECT COUNT(*) as total, COALESCE(MAX(id), 0) as max_id
 		FROM logs WHERE type IN (2, 5)`)
 	if err != nil {

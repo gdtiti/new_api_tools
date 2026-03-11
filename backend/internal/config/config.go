@@ -30,6 +30,8 @@ type Config struct {
 	// Database
 	SQLDSN         string         `json:"sql_dsn"`
 	DatabaseEngine DatabaseEngine `json:"database_engine"`
+	LogSQLDSN      string         `json:"log_sql_dsn"`
+	LogDatabaseEngine DatabaseEngine `json:"log_database_engine"`
 
 	// Redis
 	RedisConnString string `json:"redis_conn_string"`
@@ -69,6 +71,7 @@ func Load() *Config {
 
 		// Database
 		SQLDSN: getEnvStr("SQL_DSN", ""),
+		LogSQLDSN: getEnvStr("LOG_SQL_DSN", ""),
 
 		// Redis
 		RedisConnString: getEnvStr("REDIS_CONN_STRING", ""),
@@ -99,6 +102,10 @@ func Load() *Config {
 	if cfg.SQLDSN == "" {
 		cfg.SQLDSN = buildDSNFromSplitFields()
 	}
+	// ======== Log database DSN (optional) ========
+	if cfg.LogSQLDSN == "" {
+		cfg.LogSQLDSN = buildLogDSNFromSplitFields()
+	}
 
 	// ======== Backward compatibility: build Redis conn string ========
 	if cfg.RedisConnString == "" {
@@ -107,6 +114,11 @@ func Load() *Config {
 
 	// Auto-detect database engine from DSN
 	cfg.DatabaseEngine = detectEngine(cfg.SQLDSN)
+	if cfg.LogSQLDSN != "" {
+		cfg.LogDatabaseEngine = detectEngine(cfg.LogSQLDSN)
+	} else {
+		cfg.LogDatabaseEngine = cfg.DatabaseEngine
+	}
 
 	// Generate random JWT secret if not explicitly configured
 	if cfg.JWTSecretKey == "" {
@@ -150,6 +162,34 @@ func buildDSNFromSplitFields() string {
 		return dsn
 	default:
 		// MySQL: user:pass@tcp(host:port)/dbname?charset=utf8mb4&parseTime=True
+		if port == "" {
+			port = "3306"
+		}
+		return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True", user, pass, host, port, name)
+	}
+}
+
+// buildLogDSNFromSplitFields constructs LOG_SQL_DSN from LOG_DB_* split fields
+func buildLogDSNFromSplitFields() string {
+	engine := strings.ToLower(getEnvStr("LOG_DB_ENGINE", getEnvStr("DB_ENGINE", "")))
+	host := getEnvStr("LOG_DB_DNS", "")
+	port := getEnvStr("LOG_DB_PORT", "")
+	name := getEnvStr("LOG_DB_NAME", "")
+	user := getEnvStr("LOG_DB_USER", "")
+	pass := getEnvStr("LOG_DB_PASSWORD", "")
+
+	if host == "" {
+		return ""
+	}
+
+	switch engine {
+	case "postgres", "postgresql":
+		dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable", host, user, pass, name)
+		if port != "" {
+			dsn = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", host, port, user, pass, name)
+		}
+		return dsn
+	default:
 		if port == "" {
 			port = "3306"
 		}
@@ -223,9 +263,31 @@ func (c *Config) DSN() string {
 	return dsn
 }
 
+// LogDSN returns the log database DSN if configured, otherwise falls back to main DSN
+func (c *Config) LogDSN() string {
+	if c.LogSQLDSN == "" {
+		return c.DSN()
+	}
+	dsn := c.LogSQLDSN
+	if strings.HasPrefix(dsn, "mysql://") {
+		dsn = strings.TrimPrefix(dsn, "mysql://")
+	}
+	return dsn
+}
+
 // DriverName returns the database driver name for sqlx
 func (c *Config) DriverName() string {
 	switch c.DatabaseEngine {
+	case PostgreSQL:
+		return "pgx"
+	default:
+		return "mysql"
+	}
+}
+
+// LogDriverName returns the database driver name for log database
+func (c *Config) LogDriverName() string {
+	switch c.LogDatabaseEngine {
 	case PostgreSQL:
 		return "pgx"
 	default:

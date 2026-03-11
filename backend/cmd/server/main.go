@@ -37,6 +37,11 @@ func main() {
 		logger.L.Fatal("数据库初始化失败: " + err.Error())
 	}
 	defer database.Close()
+	_, err = database.InitLog(cfg)
+	if err != nil {
+		logger.L.Fatal("日志数据库初始化失败: " + err.Error())
+	}
+	defer database.CloseLog()
 
 	// Ensure indexes (background, with delay to reduce load)
 	go func() {
@@ -48,6 +53,10 @@ func main() {
 		time.Sleep(2 * time.Second)
 		db := database.Get()
 		db.EnsureIndexes(true, 500*time.Millisecond)
+		logDB := database.GetLog()
+		if logDB != db {
+			logDB.EnsureIndexes(true, 500*time.Millisecond)
+		}
 	}()
 
 	// ========== 4. Initialize Redis cache ==========

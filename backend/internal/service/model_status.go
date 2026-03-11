@@ -64,12 +64,16 @@ func roundRate(rate float64) float64 {
 
 // ModelStatusService handles model availability monitoring
 type ModelStatusService struct {
-	db *database.Manager
+	db    *database.Manager
+	logDB *database.Manager
 }
 
 // NewModelStatusService creates a new ModelStatusService
 func NewModelStatusService() *ModelStatusService {
-	return &ModelStatusService{db: database.Get()}
+	return &ModelStatusService{
+		db:    database.Get(),
+		logDB: database.GetLog(),
+	}
 }
 
 // GetAvailableModels returns all models with 24h request counts
@@ -83,14 +87,14 @@ func (s *ModelStatusService) GetAvailableModels() ([]map[string]interface{}, err
 
 	startTime := time.Now().Unix() - 86400
 
-	query := s.db.RebindQuery(`
+	query := s.logDB.RebindQuery(`
 		SELECT model_name, COUNT(*) as request_count_24h
 		FROM logs
 		WHERE type IN (2, 5) AND model_name != '' AND created_at >= ?
 		GROUP BY model_name
 		ORDER BY request_count_24h DESC`)
 
-	rows, err := s.db.Query(query, startTime)
+	rows, err := s.logDB.Query(query, startTime)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +127,7 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 
 	// Single optimized query — aggregate by time slot using FLOOR division
 	// This reduces N queries to 1 query per model (matches Python backend)
-	slotQuery := s.db.RebindQuery(fmt.Sprintf(`
+	slotQuery := s.logDB.RebindQuery(fmt.Sprintf(`
 		SELECT FLOOR((created_at - %d) / %d) as slot_idx,
 			COUNT(*) as total,
 			SUM(CASE WHEN type = 2 THEN 1 ELSE 0 END) as success
@@ -135,7 +139,7 @@ func (s *ModelStatusService) GetModelStatus(modelName, window string) (map[strin
 		startTime, slotSeconds,
 		startTime, slotSeconds))
 
-	rows, _ := s.db.Query(slotQuery, modelName, startTime, now)
+	rows, _ := s.logDB.Query(slotQuery, modelName, startTime, now)
 
 	// Initialize all slots with zeros
 	type slotInfo struct {

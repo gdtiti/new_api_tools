@@ -23,6 +23,7 @@ type Manager struct {
 
 // Global database manager
 var mgr *Manager
+var logMgr *Manager
 
 // Init creates and configures the database connection pool
 func Init(cfg *config.Config) (*Manager, error) {
@@ -62,6 +63,49 @@ func Init(cfg *config.Config) (*Manager, error) {
 	return mgr, nil
 }
 
+// InitLog creates and configures the log database connection pool (optional)
+// If LOG_SQL_DSN/LOG_DB_* is not configured, it falls back to the main database.
+func InitLog(cfg *config.Config) (*Manager, error) {
+	if cfg.LogSQLDSN == "" {
+		logMgr = mgr
+		logger.L.System("日志库未配置，使用主库")
+		return logMgr, nil
+	}
+
+	driverName := cfg.LogDriverName()
+	dsn := cfg.LogDSN()
+	if dsn == "" {
+		logMgr = mgr
+		logger.L.System("日志库 DSN 为空，使用主库")
+		return logMgr, nil
+	}
+
+	db, err := sqlx.Connect(driverName, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("log database connection failed: %w", err)
+	}
+
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetConnMaxIdleTime(3 * time.Minute)
+
+	isPG := cfg.LogDatabaseEngine == config.PostgreSQL
+	logMgr = &Manager{
+		DB:     db,
+		Config: cfg,
+		IsPG:   isPG,
+	}
+
+	engineStr := "MySQL"
+	if isPG {
+		engineStr = "PostgreSQL"
+	}
+	logger.L.DBConnected(engineStr+"(Log)", extractHost(dsn), extractDB(dsn))
+
+	return logMgr, nil
+}
+
 // Get returns the global database manager
 func Get() *Manager {
 	if mgr == nil {
@@ -70,11 +114,28 @@ func Get() *Manager {
 	return mgr
 }
 
+// GetLog returns the log database manager (fallbacks to main database if not configured)
+func GetLog() *Manager {
+	if logMgr != nil {
+		return logMgr
+	}
+	return Get()
+}
+
 // Close closes the database connection
 func Close() error {
 	if mgr != nil && mgr.DB != nil {
 		logger.L.DBDisconnected("正常关闭")
 		return mgr.DB.Close()
+	}
+	return nil
+}
+
+// CloseLog closes the log database connection if it is separate from main
+func CloseLog() error {
+	if logMgr != nil && logMgr != mgr && logMgr.DB != nil {
+		logger.L.DBDisconnected("日志库关闭")
+		return logMgr.DB.Close()
 	}
 	return nil
 }

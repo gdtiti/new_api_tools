@@ -17,12 +17,16 @@ import (
 
 // AIAutoBanService handles AI-assisted automatic user banning
 type AIAutoBanService struct {
-	db *database.Manager
+	db    *database.Manager
+	logDB *database.Manager
 }
 
 // NewAIAutoBanService creates a new AIAutoBanService
 func NewAIAutoBanService() *AIAutoBanService {
-	return &AIAutoBanService{db: database.Get()}
+	return &AIAutoBanService{
+		db:    database.Get(),
+		logDB: database.GetLog(),
+	}
 }
 
 // Default config
@@ -153,14 +157,14 @@ func (s *AIAutoBanService) ClearAuditLogs() map[string]interface{} {
 // GetAvailableGroups returns groups used in recent logs
 func (s *AIAutoBanService) GetAvailableGroups(days int) ([]map[string]interface{}, error) {
 	startTime := time.Now().Unix() - int64(days*86400)
-	query := s.db.RebindQuery(`
+	query := s.logDB.RebindQuery(`
 		SELECT DISTINCT group_id as name, COUNT(*) as count
 		FROM logs
 		WHERE created_at >= ? AND group_id IS NOT NULL AND group_id != ''
 		GROUP BY group_id
 		ORDER BY count DESC`)
 
-	rows, err := s.db.Query(query, startTime)
+	rows, err := s.logDB.Query(query, startTime)
 	if err != nil {
 		return nil, err
 	}
@@ -170,14 +174,14 @@ func (s *AIAutoBanService) GetAvailableGroups(days int) ([]map[string]interface{
 // GetAvailableModelsForExclude returns models used in recent logs
 func (s *AIAutoBanService) GetAvailableModelsForExclude(days int) ([]map[string]interface{}, error) {
 	startTime := time.Now().Unix() - int64(days*86400)
-	query := s.db.RebindQuery(`
+	query := s.logDB.RebindQuery(`
 		SELECT DISTINCT model_name as name, COUNT(*) as count
 		FROM logs
 		WHERE created_at >= ? AND model_name IS NOT NULL AND model_name != ''
 		GROUP BY model_name
 		ORDER BY count DESC`)
 
-	rows, err := s.db.Query(query, startTime)
+	rows, err := s.logDB.Query(query, startTime)
 	if err != nil {
 		return nil, err
 	}
@@ -201,26 +205,27 @@ func (s *AIAutoBanService) GetSuspiciousUsers(window string, limit int) ([]map[s
 	}
 
 	// Find users with high failure rates or unusual patterns
-	query := s.db.RebindQuery(`
-		SELECT l.user_id, COALESCE(u.username, '') as username,
+	query := s.logDB.RebindQuery(`
+		SELECT l.user_id,
+			MAX(COALESCE(NULLIF(l.username, ''), '')) as username,
 			COUNT(*) as total_requests,
 			SUM(CASE WHEN l.type = 5 THEN 1 ELSE 0 END) as failure_count,
 			COALESCE(SUM(l.quota), 0) as total_quota,
 			COUNT(DISTINCT l.ip) as unique_ips,
 			COUNT(DISTINCT l.model_name) as unique_models
 		FROM logs l
-		LEFT JOIN users u ON l.user_id = u.id
-		WHERE l.created_at >= ? AND l.type IN (2, 5)
-		GROUP BY l.user_id, u.username
+		WHERE l.created_at >= ? AND l.type IN (2, 5) AND l.user_id IS NOT NULL
+		GROUP BY l.user_id
 		HAVING COUNT(*) >= 10
 		ORDER BY failure_count DESC, total_requests DESC
 		LIMIT ?`)
 
-	rows, err := s.db.Query(query, startTime, limit)
+	rows, err := s.logDB.Query(query, startTime, limit)
 	if err != nil {
 		return nil, err
 	}
 
+	missingUserIDs := make([]int64, 0)
 	for _, row := range rows {
 		total := toInt64(row["total_requests"])
 		failures := toInt64(row["failure_count"])
@@ -229,10 +234,74 @@ func (s *AIAutoBanService) GetSuspiciousUsers(window string, limit int) ([]map[s
 		} else {
 			row["failure_rate"] = 0.0
 		}
+		if toString(row["username"]) == "" {
+			userID := toInt64(row["user_id"])
+			if userID > 0 {
+				missingUserIDs = append(missingUserIDs, userID)
+			}
+		}
+	}
+
+	if len(missingUserIDs) > 0 {
+		userNames := s.getUsernamesByIDs(missingUserIDs)
+		for _, row := range rows {
+			if toString(row["username"]) != "" {
+				continue
+			}
+			userID := toInt64(row["user_id"])
+			if userID <= 0 {
+				continue
+			}
+			if name, ok := userNames[userID]; ok {
+				row["username"] = name
+			}
+		}
 	}
 
 	cm.Set(cacheKey, rows, 2*time.Minute)
 	return rows, nil
+}
+
+func (s *AIAutoBanService) getUsernamesByIDs(userIDs []int64) map[int64]string {
+	result := make(map[int64]string)
+	if len(userIDs) == 0 {
+		return result
+	}
+	unique := make([]int64, 0, len(userIDs))
+	seen := make(map[int64]struct{})
+	for _, id := range userIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return result
+	}
+	placeholders := buildPlaceholders(s.db.IsPG, len(unique), 1)
+	args := make([]interface{}, 0, len(unique))
+	for _, id := range unique {
+		args = append(args, id)
+	}
+	query := fmt.Sprintf("SELECT id, username FROM users WHERE deleted_at IS NULL AND id IN (%s)", placeholders)
+	if !s.db.IsPG {
+		query = s.db.RebindQuery(query)
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil || rows == nil {
+		return result
+	}
+	for _, row := range rows {
+		id := toInt64(row["id"])
+		if id > 0 {
+			result[id] = toString(row["username"])
+		}
+	}
+	return result
 }
 
 // ManualAssess performs AI assessment on a single user (placeholder)

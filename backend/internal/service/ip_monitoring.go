@@ -22,12 +22,16 @@ var WindowSeconds = map[string]int64{
 
 // IPMonitoringService handles IP analysis queries
 type IPMonitoringService struct {
-	db *database.Manager
+	db    *database.Manager
+	logDB *database.Manager
 }
 
 // NewIPMonitoringService creates a new IPMonitoringService
 func NewIPMonitoringService() *IPMonitoringService {
-	return &IPMonitoringService{db: database.Get()}
+	return &IPMonitoringService{
+		db:    database.Get(),
+		logDB: database.GetLog(),
+	}
 }
 
 // GetIPStats returns IP recording statistics matching the Python format:
@@ -84,7 +88,7 @@ func (s *IPMonitoringService) GetIPStats() (map[string]interface{}, error) {
 
 	// Get unique IPs in last 24h
 	startTime := time.Now().Unix() - 86400
-	ipRow, _ := s.db.QueryOne(s.db.RebindQuery(
+	ipRow, _ := s.logDB.QueryOne(s.logDB.RebindQuery(
 		"SELECT COUNT(DISTINCT ip) as unique_ips FROM logs WHERE created_at >= ? AND ip IS NOT NULL AND ip <> ''"),
 		startTime)
 	uniqueIPs := int64(0)
@@ -119,7 +123,7 @@ func (s *IPMonitoringService) GetSharedIPs(window string, minTokens, limit int) 
 	}
 
 	// Get IPs with multiple tokens — use parameterized queries
-	query := s.db.RebindQuery(`
+	query := s.logDB.RebindQuery(`
 		SELECT ip, COUNT(DISTINCT token_id) as token_count,
 			COUNT(DISTINCT user_id) as user_count,
 			COUNT(*) as request_count
@@ -130,7 +134,7 @@ func (s *IPMonitoringService) GetSharedIPs(window string, minTokens, limit int) 
 		ORDER BY token_count DESC
 		LIMIT ?`)
 
-	rows, err := s.db.Query(query, startTime, minTokens, limit)
+	rows, err := s.logDB.Query(query, startTime, minTokens, limit)
 	if err != nil {
 		return map[string]interface{}{
 			"items":      []interface{}{},
@@ -150,30 +154,52 @@ func (s *IPMonitoringService) GetSharedIPs(window string, minTokens, limit int) 
 		}
 
 		if len(ips) > 0 {
-			placeholders := buildPlaceholders(s.db.IsPG, len(ips), 2) // start at $2 for PG
+			placeholders := buildPlaceholders(s.logDB.IsPG, len(ips), 2) // start at $2 for PG
 			args := []interface{}{startTime}
 			args = append(args, ips...)
 
-			tokenQuery := s.db.RebindQuery(fmt.Sprintf(`
+			tokenQuery := s.logDB.RebindQuery(fmt.Sprintf(`
 				SELECT l.ip, l.token_id,
-					COALESCE(t.name, '') as token_name,
+					COALESCE(MAX(l.token_name), '') as token_name,
 					l.user_id,
-					COALESCE(u.username, '') as username,
+					COALESCE(MAX(l.username), '') as username,
 					COUNT(*) as request_count
 				FROM logs l
-				LEFT JOIN tokens t ON l.token_id = t.id
-				LEFT JOIN users u ON l.user_id = u.id
 				WHERE l.created_at >= ? AND l.ip IN (%s)
-				GROUP BY l.ip, l.token_id, t.name, l.user_id, u.username
+				GROUP BY l.ip, l.token_id, l.user_id
 				ORDER BY l.ip, request_count DESC`, placeholders))
 
-			tokenRows, err := s.db.Query(tokenQuery, args...)
+			tokenRows, err := s.logDB.Query(tokenQuery, args...)
 			if err == nil {
+				// 用主库补齐缺失的用户名/Token 名称，避免跨库 JOIN
+				missingUserIDs := make([]int64, 0)
+				missingTokenIDs := make([]int64, 0)
+				for _, tr := range tokenRows {
+					if toString(tr["username"]) == "" && toInt64(tr["user_id"]) > 0 {
+						missingUserIDs = append(missingUserIDs, toInt64(tr["user_id"]))
+					}
+					if toString(tr["token_name"]) == "" && toInt64(tr["token_id"]) > 0 {
+						missingTokenIDs = append(missingTokenIDs, toInt64(tr["token_id"]))
+					}
+				}
+				userNames := s.getUsernamesByIDs(missingUserIDs)
+				tokenNames := s.getTokenNamesByIDs(missingTokenIDs)
+
 				// Group tokens by IP
 				tokensByIP := map[string][]map[string]interface{}{}
 				for _, tr := range tokenRows {
 					ip := toString(tr["ip"])
 					delete(tr, "ip")
+					if toString(tr["username"]) == "" {
+						if name, ok := userNames[toInt64(tr["user_id"])]; ok {
+							tr["username"] = name
+						}
+					}
+					if toString(tr["token_name"]) == "" {
+						if name, ok := tokenNames[toInt64(tr["token_id"])]; ok {
+							tr["token_name"] = name
+						}
+					}
 					tokensByIP[ip] = append(tokensByIP[ip], tr)
 				}
 				for _, row := range rows {
@@ -219,20 +245,18 @@ func (s *IPMonitoringService) GetMultiIPTokens(window string, minIPs, limit int)
 		return cached, nil
 	}
 
-	query := s.db.RebindQuery(`
-		SELECT l.token_id, COALESCE(t.name, '') as token_name,
-			l.user_id, COALESCE(u.username, '') as username,
+	query := s.logDB.RebindQuery(`
+		SELECT l.token_id, COALESCE(MAX(l.token_name), '') as token_name,
+			l.user_id, COALESCE(MAX(l.username), '') as username,
 			COUNT(DISTINCT l.ip) as ip_count, COUNT(*) as request_count
 		FROM logs l
-		LEFT JOIN tokens t ON l.token_id = t.id
-		LEFT JOIN users u ON l.user_id = u.id
 		WHERE l.created_at >= ? AND l.ip IS NOT NULL AND l.ip <> ''
-		GROUP BY l.token_id, t.name, l.user_id, u.username
+		GROUP BY l.token_id, l.user_id
 		HAVING COUNT(DISTINCT l.ip) >= ?
 		ORDER BY ip_count DESC
 		LIMIT ?`)
 
-	rows, err := s.db.Query(query, startTime, minIPs, limit)
+	rows, err := s.logDB.Query(query, startTime, minIPs, limit)
 	if err != nil {
 		return map[string]interface{}{
 			"items":   []interface{}{},
@@ -249,18 +273,18 @@ func (s *IPMonitoringService) GetMultiIPTokens(window string, minIPs, limit int)
 			tokenIDs = append(tokenIDs, toInt64(row["token_id"]))
 		}
 
-		placeholders := buildPlaceholders(s.db.IsPG, len(tokenIDs), 2)
+		placeholders := buildPlaceholders(s.logDB.IsPG, len(tokenIDs), 2)
 		args := []interface{}{startTime}
 		args = append(args, tokenIDs...)
 
-		ipQuery := s.db.RebindQuery(fmt.Sprintf(`
+		ipQuery := s.logDB.RebindQuery(fmt.Sprintf(`
 			SELECT token_id, ip, COUNT(*) as request_count
 			FROM logs
 			WHERE created_at >= ? AND token_id IN (%s) AND ip IS NOT NULL AND ip <> ''
 			GROUP BY token_id, ip
 			ORDER BY token_id, request_count DESC`, placeholders))
 
-		ipRows, err := s.db.Query(ipQuery, args...)
+		ipRows, err := s.logDB.Query(ipQuery, args...)
 		if err == nil {
 			// Group IPs by token_id, limit 20 per token
 			ipsByToken := map[int64][]map[string]interface{}{}
@@ -282,6 +306,32 @@ func (s *IPMonitoringService) GetMultiIPTokens(window string, minIPs, limit int)
 		} else {
 			for _, row := range rows {
 				row["ips"] = []interface{}{}
+			}
+		}
+	}
+
+	// 用主库补齐缺失的用户名/Token 名称，避免跨库 JOIN
+	missingUserIDs := make([]int64, 0)
+	missingTokenIDs := make([]int64, 0)
+	for _, row := range rows {
+		if toString(row["username"]) == "" && toInt64(row["user_id"]) > 0 {
+			missingUserIDs = append(missingUserIDs, toInt64(row["user_id"]))
+		}
+		if toString(row["token_name"]) == "" && toInt64(row["token_id"]) > 0 {
+			missingTokenIDs = append(missingTokenIDs, toInt64(row["token_id"]))
+		}
+	}
+	userNames := s.getUsernamesByIDs(missingUserIDs)
+	tokenNames := s.getTokenNamesByIDs(missingTokenIDs)
+	for _, row := range rows {
+		if toString(row["username"]) == "" {
+			if name, ok := userNames[toInt64(row["user_id"])]; ok {
+				row["username"] = name
+			}
+		}
+		if toString(row["token_name"]) == "" {
+			if name, ok := tokenNames[toInt64(row["token_id"])]; ok {
+				row["token_name"] = name
 			}
 		}
 	}
@@ -313,18 +363,17 @@ func (s *IPMonitoringService) GetMultiIPUsers(window string, minIPs, limit int) 
 		return cached, nil
 	}
 
-	query := s.db.RebindQuery(`
-		SELECT l.user_id, COALESCE(u.username, '') as username,
+	query := s.logDB.RebindQuery(`
+		SELECT l.user_id, COALESCE(MAX(l.username), '') as username,
 			COUNT(DISTINCT l.ip) as ip_count, COUNT(*) as request_count
 		FROM logs l
-		LEFT JOIN users u ON l.user_id = u.id
-		WHERE l.created_at >= ? AND l.ip IS NOT NULL AND l.ip <> ''
-		GROUP BY l.user_id, u.username
+		WHERE l.created_at >= ? AND l.ip IS NOT NULL AND l.ip <> '' AND l.user_id IS NOT NULL
+		GROUP BY l.user_id
 		HAVING COUNT(DISTINCT l.ip) >= ?
 		ORDER BY ip_count DESC
 		LIMIT ?`)
 
-	rows, err := s.db.Query(query, startTime, minIPs, limit)
+	rows, err := s.logDB.Query(query, startTime, minIPs, limit)
 	if err != nil {
 		return map[string]interface{}{
 			"items":   []interface{}{},
@@ -341,18 +390,18 @@ func (s *IPMonitoringService) GetMultiIPUsers(window string, minIPs, limit int) 
 			userIDs = append(userIDs, toInt64(row["user_id"]))
 		}
 
-		placeholders := buildPlaceholders(s.db.IsPG, len(userIDs), 2)
+		placeholders := buildPlaceholders(s.logDB.IsPG, len(userIDs), 2)
 		args := []interface{}{startTime}
 		args = append(args, userIDs...)
 
-		ipQuery := s.db.RebindQuery(fmt.Sprintf(`
+		ipQuery := s.logDB.RebindQuery(fmt.Sprintf(`
 			SELECT user_id, ip, COUNT(*) as request_count
 			FROM logs
 			WHERE created_at >= ? AND user_id IN (%s) AND ip IS NOT NULL AND ip <> ''
 			GROUP BY user_id, ip
 			ORDER BY user_id, request_count DESC`, placeholders))
 
-		ipRows, err := s.db.Query(ipQuery, args...)
+		ipRows, err := s.logDB.Query(ipQuery, args...)
 		if err == nil {
 			// Group IPs by user_id, limit 10 per user
 			ipsByUser := map[int64][]map[string]interface{}{}
@@ -378,6 +427,22 @@ func (s *IPMonitoringService) GetMultiIPUsers(window string, minIPs, limit int) 
 		}
 	}
 
+	// 用主库补齐缺失的用户名，避免跨库 JOIN
+	missingUserIDs := make([]int64, 0)
+	for _, row := range rows {
+		if toString(row["username"]) == "" && toInt64(row["user_id"]) > 0 {
+			missingUserIDs = append(missingUserIDs, toInt64(row["user_id"]))
+		}
+	}
+	userNames := s.getUsernamesByIDs(missingUserIDs)
+	for _, row := range rows {
+		if toString(row["username"]) == "" {
+			if name, ok := userNames[toInt64(row["user_id"])]; ok {
+				row["username"] = name
+			}
+		}
+	}
+
 	result := map[string]interface{}{
 		"items":   rows,
 		"total":   len(rows),
@@ -397,20 +462,18 @@ func (s *IPMonitoringService) LookupIPUsers(ip, window string, limit int) (map[s
 	}
 	startTime := time.Now().Unix() - seconds
 
-	query := s.db.RebindQuery(`
-		SELECT l.user_id, COALESCE(u.username, '') as username,
-			l.token_id, COALESCE(t.name, '') as token_name,
+	query := s.logDB.RebindQuery(`
+		SELECT l.user_id, COALESCE(MAX(l.username), '') as username,
+			l.token_id, COALESCE(MAX(l.token_name), '') as token_name,
 			COUNT(*) as request_count,
 			MIN(l.created_at) as first_seen, MAX(l.created_at) as last_seen
 		FROM logs l
-		LEFT JOIN users u ON l.user_id = u.id
-		LEFT JOIN tokens t ON l.token_id = t.id
 		WHERE l.created_at >= ? AND l.ip = ?
-		GROUP BY l.user_id, u.username, l.token_id, t.name
+		GROUP BY l.user_id, l.token_id
 		ORDER BY request_count DESC
 		LIMIT ?`)
 
-	rows, err := s.db.Query(query, startTime, ip, limit)
+	rows, err := s.logDB.Query(query, startTime, ip, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -426,16 +489,42 @@ func (s *IPMonitoringService) LookupIPUsers(ip, window string, limit int) (map[s
 	}
 
 	// Get model usage for this IP
-	modelQuery := s.db.RebindQuery(`
+	modelQuery := s.logDB.RebindQuery(`
 		SELECT model_name as model, COUNT(*) as count
 		FROM logs
 		WHERE created_at >= ? AND ip = ? AND model_name IS NOT NULL AND model_name <> ''
 		GROUP BY model_name
 		ORDER BY count DESC
 		LIMIT 20`)
-	modelRows, _ := s.db.Query(modelQuery, startTime, ip)
+	modelRows, _ := s.logDB.Query(modelQuery, startTime, ip)
 	if modelRows == nil {
 		modelRows = []map[string]interface{}{}
+	}
+
+	// 用主库补齐缺失的用户名/Token 名称，避免跨库 JOIN
+	missingUserIDs := make([]int64, 0)
+	missingTokenIDs := make([]int64, 0)
+	for _, row := range rows {
+		if toString(row["username"]) == "" && toInt64(row["user_id"]) > 0 {
+			missingUserIDs = append(missingUserIDs, toInt64(row["user_id"]))
+		}
+		if toString(row["token_name"]) == "" && toInt64(row["token_id"]) > 0 {
+			missingTokenIDs = append(missingTokenIDs, toInt64(row["token_id"]))
+		}
+	}
+	userNames := s.getUsernamesByIDs(missingUserIDs)
+	tokenNames := s.getTokenNamesByIDs(missingTokenIDs)
+	for _, row := range rows {
+		if toString(row["username"]) == "" {
+			if name, ok := userNames[toInt64(row["user_id"])]; ok {
+				row["username"] = name
+			}
+		}
+		if toString(row["token_name"]) == "" {
+			if name, ok := tokenNames[toInt64(row["token_id"])]; ok {
+				row["token_name"] = name
+			}
+		}
 	}
 
 	return map[string]interface{}{
@@ -458,7 +547,7 @@ func (s *IPMonitoringService) GetUserIPs(userID int64, window string) (map[strin
 	}
 	startTime := time.Now().Unix() - seconds
 
-	query := s.db.RebindQuery(`
+	query := s.logDB.RebindQuery(`
 		SELECT ip, COUNT(*) as request_count,
 			MIN(created_at) as first_seen, MAX(created_at) as last_seen
 		FROM logs
@@ -466,7 +555,7 @@ func (s *IPMonitoringService) GetUserIPs(userID int64, window string) (map[strin
 		GROUP BY ip
 		ORDER BY request_count DESC`)
 
-	rows, err := s.db.Query(query, userID, startTime)
+	rows, err := s.logDB.Query(query, userID, startTime)
 	if err != nil {
 		return nil, err
 	}
@@ -510,6 +599,90 @@ func (s *IPMonitoringService) EnableAllIPRecording() (map[string]interface{}, er
 		"affected": affected,
 		"message":  fmt.Sprintf("已为 %d 个用户开启 IP 记录", affected),
 	}, nil
+}
+
+func (s *IPMonitoringService) getUsernamesByIDs(userIDs []int64) map[int64]string {
+	result := make(map[int64]string)
+	if len(userIDs) == 0 {
+		return result
+	}
+	unique := make([]int64, 0, len(userIDs))
+	seen := make(map[int64]struct{})
+	for _, id := range userIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return result
+	}
+	placeholders := buildPlaceholders(s.db.IsPG, len(unique), 1)
+	args := make([]interface{}, 0, len(unique))
+	for _, id := range unique {
+		args = append(args, id)
+	}
+	query := fmt.Sprintf("SELECT id, username FROM users WHERE deleted_at IS NULL AND id IN (%s)", placeholders)
+	if !s.db.IsPG {
+		query = s.db.RebindQuery(query)
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil || rows == nil {
+		return result
+	}
+	for _, row := range rows {
+		id := toInt64(row["id"])
+		if id > 0 {
+			result[id] = toString(row["username"])
+		}
+	}
+	return result
+}
+
+func (s *IPMonitoringService) getTokenNamesByIDs(tokenIDs []int64) map[int64]string {
+	result := make(map[int64]string)
+	if len(tokenIDs) == 0 {
+		return result
+	}
+	unique := make([]int64, 0, len(tokenIDs))
+	seen := make(map[int64]struct{})
+	for _, id := range tokenIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return result
+	}
+	placeholders := buildPlaceholders(s.db.IsPG, len(unique), 1)
+	args := make([]interface{}, 0, len(unique))
+	for _, id := range unique {
+		args = append(args, id)
+	}
+	query := fmt.Sprintf("SELECT id, name FROM tokens WHERE id IN (%s)", placeholders)
+	if !s.db.IsPG {
+		query = s.db.RebindQuery(query)
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil || rows == nil {
+		return result
+	}
+	for _, row := range rows {
+		id := toInt64(row["id"])
+		if id > 0 {
+			result[id] = toString(row["name"])
+		}
+	}
+	return result
 }
 
 // buildPlaceholders generates SQL placeholders for IN clauses.
