@@ -9,23 +9,32 @@ app_port: 7860
 
 # NewAPI Tools (HF Space)
 
-此目录用于 Hugging Face Spaces 的 Docker 快速部署。
-构建时直接复用 GHCR 预构建镜像，避免重复编译。
+This directory is for Hugging Face Spaces Docker deployment.
+It reuses a prebuilt GHCR image to avoid rebuilding inside Spaces.
 
-## 使用方式
+## Usage
 
-1. 将 `_hf/` 目录内容同步到 Space 仓库根目录。
-2. 在 Space 的 Variables 中配置环境变量。
-3. 启动后访问 `https://<space>.hf.space/`。
+1. Copy the contents of `_hf/` to the root of your Space repository.
+2. Configure the required variables in Space Settings -> Variables.
+3. Start the Space and visit `https://<space>.hf.space/`.
 
-## 必填环境变量
+## Required Variables
 
 - `ADMIN_PASSWORD`
 - `API_KEY`
 - `JWT_SECRET`
-- `SQL_DSN`（或使用分离配置 `DB_ENGINE` / `DB_DNS` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD`）
+- `SQL_DSN`
 
-## 可选环境变量
+If you do not use `SQL_DSN`, provide these split variables instead:
+
+- `DB_ENGINE`
+- `DB_DNS`
+- `DB_PORT`
+- `DB_NAME`
+- `DB_USER`
+- `DB_PASSWORD`
+
+## Optional Variables
 
 - `NEWAPI_BASEURL`
 - `NEWAPI_API_KEY`
@@ -34,6 +43,21 @@ app_port: 7860
 - `REDIS_MAXMEMORY`
 - `REDIS_MAXMEMORY_POLICY`
 
-## 端口说明
+## Port Notes
 
-- 默认对外端口为 `7860`，HF 会自动注入 `PORT`。
+- The public port is `7860`, and HF injects `PORT` automatically.
+- Do not override `PORT` in Space Variables unless you also change `app_port`.
+- The backend listens on `SERVER_PORT=8000`, and Nginx exposes `PORT`.
+
+## Startup Self-Check
+
+- The container renders the Nginx port config at startup before running readiness checks.
+- If any hop in `PORT -> Nginx -> backend` fails, the container exits with clear diagnostics instead of waiting for HF to send `SIGTERM` later.
+- Look for log prefixes `[startup]` and `[healthcheck]`.
+
+## Troubleshooting
+
+- Make sure the Space root `README.md` still contains `sdk: docker` and `app_port: 7860`.
+- Make sure `_hf/Dockerfile` points to the GHCR image digest you actually published.
+- If logs show `frontend probe failed` but `backend probe passed`, the issue is in the Nginx listen port or proxy layer.
+- If both probes fail, inspect the backend startup on port `8000` and verify required environment variables.

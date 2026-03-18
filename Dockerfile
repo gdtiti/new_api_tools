@@ -63,8 +63,10 @@ COPY --from=frontend-builder /app/dist /usr/share/nginx/html
 # 复制 Nginx 配置
 COPY frontend/nginx.conf /etc/nginx/http.d/default.conf
 
-# 修改 Nginx 配置，代理到本地 Go 后端
-RUN sed -i 's|http://backend:8000|http://127.0.0.1:8000|g' /etc/nginx/http.d/default.conf
+# Copy container startup helpers
+COPY docker/entrypoint.sh /app/docker/entrypoint.sh
+COPY docker/healthcheck.sh /app/docker/healthcheck.sh
+RUN chmod +x /app/docker/entrypoint.sh /app/docker/healthcheck.sh
 
 # Supervisor 配置 - 同时运行 Nginx / Go 后端 / Redis
 RUN mkdir -p /etc/supervisor.d && \
@@ -106,10 +108,12 @@ ENV SERVER_PORT=8000
 ENV REDIS_HOST=127.0.0.1
 ENV REDIS_PORT=6379
 ENV PORT=7860
+ENV STARTUP_TIMEOUT_SECONDS=60
+ENV HEALTHCHECK_CURL_TIMEOUT_SECONDS=5
 
 EXPOSE 7860
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f "http://localhost:${PORT:-7860}/api/health" || exit 1
+    CMD ["/app/docker/healthcheck.sh"]
 
-CMD ["/bin/sh", "-c", "PORT=${PORT:-7860}; export PORT; sed -i \"s/listen [0-9][0-9]*;/listen ${PORT};/\" /etc/nginx/http.d/default.conf; exec /usr/bin/supervisord -c /etc/supervisord.conf"]
+CMD ["/app/docker/entrypoint.sh"]
