@@ -102,3 +102,4 @@ test_cf_bypass_go/main.go
 test_cf_bypass_go/test_cf.exe
 database_schema.sql
 .ace-tool/
+.devone/worktree/
