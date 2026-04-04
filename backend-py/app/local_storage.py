@@ -185,6 +185,51 @@ class LocalStorage:
                 ON auto_group_logs(user_id)
             """)
 
+            # Temporary account sidecar metadata
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS temporary_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL UNIQUE,
+                    username TEXT NOT NULL,
+                    default_token_id INTEGER DEFAULT 0,
+                    default_token_key_masked TEXT DEFAULT '',
+                    created_by TEXT DEFAULT '',
+                    remark TEXT DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    expires_at INTEGER DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_temporary_accounts_status
+                ON temporary_accounts(status)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_temporary_accounts_expires
+                ON temporary_accounts(expires_at)
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS temporary_account_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    temporary_account_id INTEGER DEFAULT 0,
+                    user_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    operator TEXT DEFAULT '',
+                    detail TEXT DEFAULT '',
+                    created_at INTEGER NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_temporary_account_events_user
+                ON temporary_account_events(user_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_temporary_account_events_time
+                ON temporary_account_events(created_at)
+            """)
+
             conn.commit()
             logger.info(f"LocalStorage initialized at {self.db_path}")
 
@@ -442,6 +487,321 @@ class LocalStorage:
                 "context": ctx,
                 "created_at": int(row["created_at"]),
             }
+
+    # ==================== Temporary Account Sidecar Methods ====================
+
+    def create_temporary_account(
+        self,
+        *,
+        user_id: int,
+        username: str,
+        default_token_id: int = 0,
+        default_token_key_masked: str = "",
+        created_by: str = "",
+        remark: str = "",
+        status: str = "active",
+        expires_at: int = 0,
+        created_at: Optional[int] = None,
+    ) -> int:
+        now = int(created_at or time.time())
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO temporary_accounts (
+                    user_id,
+                    username,
+                    default_token_id,
+                    default_token_key_masked,
+                    created_by,
+                    remark,
+                    status,
+                    expires_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(user_id),
+                    username,
+                    int(default_token_id or 0),
+                    default_token_key_masked or "",
+                    created_by or "",
+                    remark or "",
+                    status or "active",
+                    int(expires_at or 0),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid or 0)
+
+    def update_temporary_account(
+        self,
+        user_id: int,
+        *,
+        default_token_id: Optional[int] = None,
+        default_token_key_masked: Optional[str] = None,
+        created_by: Optional[str] = None,
+        remark: Optional[str] = None,
+        status: Optional[str] = None,
+        expires_at: Optional[int] = None,
+    ) -> bool:
+        updates: List[str] = []
+        params: List[Any] = []
+        if default_token_id is not None:
+            updates.append("default_token_id = ?")
+            params.append(int(default_token_id))
+        if default_token_key_masked is not None:
+            updates.append("default_token_key_masked = ?")
+            params.append(default_token_key_masked)
+        if created_by is not None:
+            updates.append("created_by = ?")
+            params.append(created_by)
+        if remark is not None:
+            updates.append("remark = ?")
+            params.append(remark)
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        if expires_at is not None:
+            updates.append("expires_at = ?")
+            params.append(int(expires_at))
+        if not updates:
+            return False
+
+        updates.append("updated_at = ?")
+        params.append(int(time.time()))
+        params.append(int(user_id))
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE temporary_accounts SET {', '.join(updates)} WHERE user_id = ?",
+                params,
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_temporary_account(self, user_id: int) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    username,
+                    default_token_id,
+                    default_token_key_masked,
+                    created_by,
+                    remark,
+                    status,
+                    expires_at,
+                    created_at,
+                    updated_at
+                FROM temporary_accounts
+                WHERE user_id = ?
+                LIMIT 1
+                """,
+                (int(user_id),),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "id": int(row["id"]),
+                "user_id": int(row["user_id"]),
+                "username": row["username"] or "",
+                "default_token_id": int(row["default_token_id"] or 0),
+                "default_token_key_masked": row["default_token_key_masked"] or "",
+                "created_by": row["created_by"] or "",
+                "remark": row["remark"] or "",
+                "status": row["status"] or "active",
+                "expires_at": int(row["expires_at"] or 0),
+                "created_at": int(row["created_at"] or 0),
+                "updated_at": int(row["updated_at"] or 0),
+            }
+
+    def delete_temporary_account(self, user_id: int) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM temporary_accounts WHERE user_id = ?", (int(user_id),))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def list_temporary_accounts(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        status: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        page = max(1, int(page))
+        page_size = max(1, min(200, int(page_size)))
+        offset = (page - 1) * page_size
+
+        where = []
+        params: List[Any] = []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT COUNT(*) as cnt FROM temporary_accounts {where_sql}", params)
+            total = int(cursor.fetchone()["cnt"])
+            cursor.execute(
+                f"""
+                SELECT
+                    id,
+                    user_id,
+                    username,
+                    default_token_id,
+                    default_token_key_masked,
+                    created_by,
+                    remark,
+                    status,
+                    expires_at,
+                    created_at,
+                    updated_at
+                FROM temporary_accounts
+                {where_sql}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, page_size, offset],
+            )
+            rows = cursor.fetchall()
+
+        items = [
+            {
+                "id": int(row["id"]),
+                "user_id": int(row["user_id"]),
+                "username": row["username"] or "",
+                "default_token_id": int(row["default_token_id"] or 0),
+                "default_token_key_masked": row["default_token_key_masked"] or "",
+                "created_by": row["created_by"] or "",
+                "remark": row["remark"] or "",
+                "status": row["status"] or "active",
+                "expires_at": int(row["expires_at"] or 0),
+                "created_at": int(row["created_at"] or 0),
+                "updated_at": int(row["updated_at"] or 0),
+            }
+            for row in rows
+        ]
+
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size,
+        }
+
+    def add_temporary_account_event(
+        self,
+        *,
+        user_id: int,
+        action: str,
+        operator: str = "",
+        detail: Optional[Dict[str, Any]] = None,
+        temporary_account_id: int = 0,
+        created_at: Optional[int] = None,
+    ) -> int:
+        now = int(created_at or time.time())
+        payload = json.dumps(detail or {}, ensure_ascii=False)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO temporary_account_events (
+                    temporary_account_id,
+                    user_id,
+                    action,
+                    operator,
+                    detail,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(temporary_account_id or 0),
+                    int(user_id),
+                    action,
+                    operator or "",
+                    payload,
+                    now,
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid or 0)
+
+    def list_temporary_account_events(
+        self,
+        user_id: Optional[int] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(200, int(limit)))
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if user_id is not None:
+                cursor.execute(
+                    """
+                    SELECT
+                        id,
+                        temporary_account_id,
+                        user_id,
+                        action,
+                        operator,
+                        detail,
+                        created_at
+                    FROM temporary_account_events
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (int(user_id), limit),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT
+                        id,
+                        temporary_account_id,
+                        user_id,
+                        action,
+                        operator,
+                        detail,
+                        created_at
+                    FROM temporary_account_events
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            rows = cursor.fetchall()
+
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                detail = json.loads(row["detail"]) if row["detail"] else {}
+            except json.JSONDecodeError:
+                detail = {}
+            items.append(
+                {
+                    "id": int(row["id"]),
+                    "temporary_account_id": int(row["temporary_account_id"] or 0),
+                    "user_id": int(row["user_id"] or 0),
+                    "action": row["action"] or "",
+                    "operator": row["operator"] or "",
+                    "detail": detail,
+                    "created_at": int(row["created_at"] or 0),
+                }
+            )
+        return items
 
     def cache_cleanup_expired(self) -> int:
         """Remove all expired cache entries."""

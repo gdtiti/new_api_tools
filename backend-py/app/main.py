@@ -2024,6 +2024,9 @@ def include_routes(app: FastAPI):
     from .system_routes import router as system_router
     from .model_status_routes import router as model_status_router
     from .auto_group_routes import router as auto_group_router
+    from .channel_insights_routes import router as channel_insights_router
+    from .subscription_analytics_routes import router as subscription_analytics_router
+    from .temporary_account_routes import router as temporary_account_router
     app.include_router(router)
     app.include_router(auth_router)
     app.include_router(top_up_router)
@@ -2037,6 +2040,9 @@ def include_routes(app: FastAPI):
     app.include_router(system_router)
     app.include_router(model_status_router)
     app.include_router(auto_group_router)
+    app.include_router(channel_insights_router)
+    app.include_router(subscription_analytics_router)
+    app.include_router(temporary_account_router)
 
 
 # Create FastAPI application

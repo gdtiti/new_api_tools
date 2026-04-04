@@ -1,10 +1,42 @@
 import { ReactNode, useEffect, useState, useRef } from 'react'
-import { LayoutDashboard, Plus, Ticket, Clock, DollarSign, BarChart3, Users, LogOut, Activity, Globe, Monitor, UserPlus, Key } from 'lucide-react'
+import {
+  LayoutDashboard,
+  Plus,
+  Ticket,
+  Clock,
+  DollarSign,
+  BarChart3,
+  Users,
+  LogOut,
+  Activity,
+  Globe,
+  Monitor,
+  UserPlus,
+  Key,
+  HeartPulse,
+  Package,
+  UserCog,
+} from 'lucide-react'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
 import { cn } from '../lib/utils'
 
-export type TabType = 'dashboard' | 'risk' | 'ip-analysis' | 'generator' | 'redemptions' | 'history' | 'topups' | 'analytics' | 'model-status' | 'users' | 'auto-group' | 'tokens'
+export type TabType =
+  | 'dashboard'
+  | 'risk'
+  | 'ip-analysis'
+  | 'generator'
+  | 'redemptions'
+  | 'history'
+  | 'topups'
+  | 'analytics'
+  | 'channel-insights'
+  | 'subscription-analytics'
+  | 'model-status'
+  | 'users'
+  | 'temporary-accounts'
+  | 'auto-group'
+  | 'tokens'
 
 interface DbStatus {
   connected: boolean
@@ -26,8 +58,11 @@ const tabs: { id: TabType; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'risk', label: '风控中心', icon: Activity },
   { id: 'ip-analysis', label: 'IP分析', icon: Globe },
   { id: 'analytics', label: '日志分析', icon: BarChart3 },
+  { id: 'channel-insights', label: '渠道健康', icon: HeartPulse },
+  { id: 'subscription-analytics', label: '订阅分析', icon: Package },
   { id: 'model-status', label: '模型监控', icon: Monitor },
   { id: 'users', label: '用户管理', icon: Users },
+  { id: 'temporary-accounts', label: '临时账号', icon: UserCog },
   { id: 'tokens', label: '令牌管理', icon: Key },
   { id: 'auto-group', label: '自动分组', icon: UserPlus },
   { id: 'generator', label: '生成器', icon: Plus },
